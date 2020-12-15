@@ -17,7 +17,7 @@
 
 package org.apache.spark.sql.execution.datasources.jdbc
 
-import java.sql.{Connection, PreparedStatement, ResultSet, SQLException}
+import java.sql.{Connection, PreparedStatement, ResultSet}
 
 import scala.util.control.NonFatal
 
@@ -46,12 +46,12 @@ object JDBCRDD extends Logging {
    * @param options - JDBC options that contains url, table and other information.
    *
    * @return A StructType giving the table's Catalyst schema.
-   * @throws SQLException if the table specification is garbage.
-   * @throws SQLException if the table contains an unsupported type.
+   * @throws java.sql.SQLException if the table specification is garbage.
+   * @throws java.sql.SQLException if the table contains an unsupported type.
    */
   def resolveTable(options: JDBCOptions): StructType = {
     val url = options.url
-    val table = options.table
+    val table = options.tableOrQuery
     val dialect = JdbcDialects.get(url)
     val conn: Connection = JdbcUtils.createConnectionFactory(options)()
     try {
@@ -231,7 +231,7 @@ private[jdbc] class JDBCRDD(
     var stmt: PreparedStatement = null
     var conn: Connection = null
 
-    def close() {
+    def close(): Unit = {
       if (closed) return
       try {
         if (null != rs) {
@@ -265,7 +265,7 @@ private[jdbc] class JDBCRDD(
       closed = true
     }
 
-    context.addTaskCompletionListener{ context => close() }
+    context.addTaskCompletionListener[Unit]{ context => close() }
 
     val inputMetrics = context.taskMetrics().inputMetrics
     val part = thePart.asInstanceOf[JDBCPartition]
@@ -296,7 +296,7 @@ private[jdbc] class JDBCRDD(
 
     val myWhereClause = getWhereClause(part)
 
-    val sqlText = s"SELECT $columnList FROM ${options.table} $myWhereClause"
+    val sqlText = s"SELECT $columnList FROM ${options.tableOrQuery} $myWhereClause"
     stmt = conn.prepareStatement(sqlText,
         ResultSet.TYPE_FORWARD_ONLY, ResultSet.CONCUR_READ_ONLY)
     stmt.setFetchSize(options.fetchSize)

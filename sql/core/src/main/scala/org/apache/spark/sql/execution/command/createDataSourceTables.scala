@@ -21,7 +21,6 @@ import java.net.URI
 
 import org.apache.spark.sql._
 import org.apache.spark.sql.catalyst.catalog._
-import org.apache.spark.sql.catalyst.expressions.Attribute
 import org.apache.spark.sql.catalyst.plans.logical.LogicalPlan
 import org.apache.spark.sql.execution.SparkPlan
 import org.apache.spark.sql.execution.datasources._
@@ -139,7 +138,7 @@ case class CreateDataSourceTableAsSelectCommand(
     table: CatalogTable,
     mode: SaveMode,
     query: LogicalPlan,
-    outputColumns: Seq[Attribute])
+    outputColumnNames: Seq[String])
   extends DataWritingCommand {
 
   override def run(sparkSession: SparkSession, child: SparkPlan): Seq[Row] = {
@@ -193,6 +192,8 @@ case class CreateDataSourceTableAsSelectCommand(
       }
     }
 
+    CommandUtils.updateTableStats(sparkSession, table)
+
     Seq.empty[Row]
   }
 
@@ -214,7 +215,7 @@ case class CreateDataSourceTableAsSelectCommand(
       catalogTable = if (tableExists) Some(table) else None)
 
     try {
-      dataSource.writeAndRead(mode, query, outputColumns, physicalPlan)
+      dataSource.writeAndRead(mode, query, outputColumnNames, physicalPlan)
     } catch {
       case ex: AnalysisException =>
         logError(s"Failed to write to table ${table.identifier.unquotedString}", ex)

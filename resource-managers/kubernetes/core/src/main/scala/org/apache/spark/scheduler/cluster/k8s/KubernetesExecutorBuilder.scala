@@ -16,43 +16,58 @@
  */
 package org.apache.spark.scheduler.cluster.k8s
 
-import org.apache.spark.deploy.k8s.{KubernetesConf, KubernetesExecutorSpecificConf, KubernetesRoleSpecificConf, SparkPod}
-import org.apache.spark.deploy.k8s.features.{BasicExecutorFeatureStep, EnvSecretsFeatureStep, KubernetesFeatureConfigStep, LocalDirsFeatureStep, MountSecretsFeatureStep}
+import java.io.File
 
-private[spark] class KubernetesExecutorBuilder(
-    provideBasicStep: (KubernetesConf[KubernetesExecutorSpecificConf]) => BasicExecutorFeatureStep =
-      new BasicExecutorFeatureStep(_),
-    provideSecretsStep:
-      (KubernetesConf[_ <: KubernetesRoleSpecificConf]) => MountSecretsFeatureStep =
-      new MountSecretsFeatureStep(_),
-    provideEnvSecretsStep:
-      (KubernetesConf[_ <: KubernetesRoleSpecificConf] => EnvSecretsFeatureStep) =
-      new EnvSecretsFeatureStep(_),
-    provideLocalDirsStep: (KubernetesConf[_ <: KubernetesRoleSpecificConf])
-      => LocalDirsFeatureStep =
-      new LocalDirsFeatureStep(_)) {
+import io.fabric8.kubernetes.client.KubernetesClient
+
+import org.apache.spark.SecurityManager
+import org.apache.spark.deploy.k8s._
+import org.apache.spark.deploy.k8s.features._
+import org.apache.spark.resource.ResourceProfile
+import org.apache.spark.util.Utils
+
+private[spark] class KubernetesExecutorBuilder {
 
   def buildFromFeatures(
-    kubernetesConf: KubernetesConf[KubernetesExecutorSpecificConf]): SparkPod = {
-    val baseFeatures = Seq(
-      provideBasicStep(kubernetesConf),
-      provideLocalDirsStep(kubernetesConf))
+      conf: KubernetesExecutorConf,
+      secMgr: SecurityManager,
+      client: KubernetesClient,
+      resourceProfile: ResourceProfile): KubernetesExecutorSpec = {
+    val initialPod = conf.get(Config.KUBERNETES_EXECUTOR_PODTEMPLATE_FILE)
+      .map { file =>
+        KubernetesUtils.loadPodFromTemplate(
+          client,
+          new File(file),
+          conf.get(Config.KUBERNETES_EXECUTOR_PODTEMPLATE_CONTAINER_NAME))
+      }
+      .getOrElse(SparkPod.initialPod())
 
-    val maybeRoleSecretNamesStep = if (kubernetesConf.roleSecretNamesToMountPaths.nonEmpty) {
-      Some(provideSecretsStep(kubernetesConf)) } else None
+    val userFeatures = conf.get(Config.KUBERNETES_EXECUTOR_POD_FEATURE_STEPS)
+      .map { className =>
+        Utils.classForName(className).newInstance().asInstanceOf[KubernetesFeatureConfigStep]
+      }
 
-    val maybeProvideSecretsStep = if (kubernetesConf.roleSecretEnvNamesToKeyRefs.nonEmpty) {
-      Some(provideEnvSecretsStep(kubernetesConf)) } else None
+    val features = Seq(
+      new BasicExecutorFeatureStep(conf, secMgr, resourceProfile),
+      new ExecutorKubernetesCredentialsFeatureStep(conf),
+      new MountSecretsFeatureStep(conf),
+      new EnvSecretsFeatureStep(conf),
+      new MountVolumesFeatureStep(conf),
+      new LocalDirsFeatureStep(conf)) ++ userFeatures
 
-    val allFeatures: Seq[KubernetesFeatureConfigStep] =
-      baseFeatures ++
-      maybeRoleSecretNamesStep.toSeq ++
-      maybeProvideSecretsStep.toSeq
+    val spec = KubernetesExecutorSpec(
+      initialPod,
+      executorKubernetesResources = Seq.empty)
 
-    var executorPod = SparkPod.initialPod()
-    for (feature <- allFeatures) {
-      executorPod = feature.configurePod(executorPod)
+    // If using a template this will always get the resources from that and combine
+    // them with any Spark conf or ResourceProfile resources.
+    features.foldLeft(spec) { case (spec, feature) =>
+      val configuredPod = feature.configurePod(spec.pod)
+      val addedResources = feature.getAdditionalKubernetesResources()
+      KubernetesExecutorSpec(
+        configuredPod,
+        spec.executorKubernetesResources ++ addedResources)
     }
-    executorPod
   }
+
 }
